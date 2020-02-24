@@ -1,0 +1,155 @@
+---
+title: "Land surface temperature from Modis"
+author: "Faith Musili"
+output:
+  html_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+## *Introduction*
+
+*_Product: MOD11C3_*
+
+- Provides monthly Land Surface Temperature and Emissivity (LST&E) values in a 0.05 degree (5,600 meters at the equator) latitude/longitude Climate Modeling Grid (CMG). 
+- A CMG granule is a geographic grid with 7,200 columns and 3,600 rows representing the entire globe.
+- The LST&E values in the MOD11C3 product are derived by compositing and averaging the values from the corresponding month of MOD11C1 daily files. 
+
+*_Horizontal and vertical tiles_*
+
+- Download all horizontal and vertical tiles for the world for future use.
+
+*_Years_*
+
+- MODIS TERRA satellite was launced in December 1999 and data was available from February 2000.
+- images were downloaded from February 2000 to April 2019.
+
+*_Collection version_*
+ - Version 6 is the up to date version for this MODIS product.
+
+
+```{r load required packages, eval=F}
+library(MODISTools)
+library(rgeos)
+library(sp)
+library(raster)
+library(rgdal)
+library(MODIS)
+library(bitops)
+library(RCurl)
+library(XML)
+library(weathermetrics)
+library(raster)
+library(gdalUtils)
+```
+
+### Data download
+```{r download data , eval=F, echo=T}
+MODISoptions(localArcPath="Download/")#### path to store data
+
+getHdf(product="MOD11C3", ##### product
+       begin="2000.01.01",##### the start day for download
+       end="2000.02.01", ##### the last date for download
+       tileH=0:35,##### input the horizontal tile as per the modis path and row  outline
+       tileV=0:17,##### input the vertical tile as per the modis path and row outline
+       extent=NULL, 
+       collection=006,#### version to download
+       quiet=FALSE, 
+       wait=10)
+
+
+```
+
+### Convert hdf files to tif
+```{r, eval=F, echo=T}
+files <- list.files(pattern="\\.hdf$",full.names = FALSE,recursive = TRUE)
+
+for (filename in files)
+{
+  sds <- get_subdatasets(filename)
+  gdal_translate(sds[1], dst_dataset=paste0(substr(filename, 1, nchar(filename)-4) ,".tif"))
+}
+```
+
+### Convert kelvin to degrees celcius
+[guide](https://icess.eri.ucsb.edu/modis/LstUsrGuide/usrguide_month_cmg.html)
+
+```{r, eval=F, echo=T}
+tif.files <- list.files(pattern="\\.tif$",full.names = FALSE,recursive = TRUE)
+
+### replace all  values to degrees celcius
+for (i in 1:length(tif.files)){
+  
+  image<-raster(tif.files[i])## read files
+  
+  out.img<-kelvin.to.celsius(image, round = 1) ## convert the digital numbers from kelvin to degrees celcius
+  
+  writePath<-paste0(substr(tif.files[i], 1, nchar(tif.files[i])-4) ,"_degrees.tif")## output file path
+  writeRaster(out.img,writePath,format="GTiff", overwrite=TRUE)## write file
+}
+```
+
+### Stack all monthly images together into a stack
+```{r, eval=F, echo=T}
+## stack all months together
+lstfinal<-list.files(pattern =".*_degrees.*\\.tif$" ,recursive = TRUE,full.names = FALSE)
+
+lst.stack<-stack(lapply(lstfinal,raster))
+
+timeseq<-paste0(sort(rep(2000:2019,12)),".",rep(month.abb,12))[-1]## order year and month
+
+names(lst.stack)<-paste0("T",timeseq)## customize layer names
+lstBrick<-brick(lst.stack)
+
+tifoptions <- c("COMPRESS=DEFLATE", "PREDICTOR=2", "ZLEVEL=6")
+writeRaster(lst.stack,"lstStack_monthly.tif",options = tifoptions, overwrite = TRUE)## write entire stack
+```
+
+
+## Crop Kenya lst 
+### Monthly stack
+```{r, eval=F, echo=T}
+Kenyashp<-shapefile("shp/Kenya_shp.shp")
+Kenya_extend<-extent(Kenyashp)
+Kenyalst<-crop(lst.stack,Kenyashp)
+
+writeRaster(Kenyalst,"KenyaLstStack.tif",format="GTiff", overwrite=TRUE)## write Kenya stack to memory
+```
+
+### Yearly stack (Stack all monthly images together into a yearly stack)
+```{r, eval=F}
+Kenyalst<-brick("KenyaLstStack.tif")
+crs(Kenyalst)<-"+proj=longlat +datum=WGS84"
+
+timeseq<-c(
+  paste0(sort(rep(2000:2018,12)),".",rep(month.abb,12)),
+  paste0(rep(2019,4),".",rep(month.abb[1:4],1)))[-1]## order year and month
+
+names(Kenyalst)<-paste0("T",timeseq)## customize layer names
+
+## remove the incomplete years
+ Kenyalst<-Kenyalst[[c(12:227)]]## remove incomplete 2000 and 2019
+
+ ranges<-data.frame(start=seq(1, 205, by=12),end=seq(12, 216, by=12))
+ 
+ for (i in 1:nrow(ranges)) {
+
+   start<-ranges$start[i]
+   end<-ranges$end[i]
+   
+ img<-stackApply(Kenyalst[[start:end]],rep(1,12),fun=mean)
+ 
+ outname<-paste0("Yearly_stack/",substr(names(Kenyalst[[start]]),2,5),"_lst.tif")
+ 
+ writeRaster(img,outname,format="GTiff",overwite=TRUE)
+ 
+ }
+ 
+ lst_files<-list.files(path = "Yearly_stack/",pattern ="*.tif$" ,recursive = TRUE,full.names = TRUE)
+ 
+ yrlstBrick<-brick(lapply(lst_files,raster))
+ 
+ writeRaster(yrlstBrick,"Yearly_stack/Yearly_LST.tif",format="GTiff",overwite=TRUE)
+
+```
+
